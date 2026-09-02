@@ -129,3 +129,13 @@ func GetEmptyDirTieredStoreMountPath(levelIndex int) string {
 func getTieredStoreMountPath(levelIndex int, pathIndex int, mediumType string) string {
 	return fmt.Sprintf("/etc/fluid/mount/tiered-store/level-%d-index-%d-%s", levelIndex, pathIndex, mediumType)
 }
+
+// getTieredStoreVolumeName generates the volume name for an indexed tiered store medium
+func getTieredStoreVolumeName(levelIndex int, pathIndex int) string {
+	return fmt.Sprintf("%s%d-index-%d", tieredStoreVolumeNamePrefix, levelIndex, pathIndex)
+}
+
+// getMemoryTieredStoreVolumeName generates the volume name for the process memory medium
+func getMemoryTieredStoreVolumeName(levelIndex int) string {
+	return fmt.Sprintf("%s%d-memory", tieredStoreVolumeNamePrefix, levelIndex)
+}

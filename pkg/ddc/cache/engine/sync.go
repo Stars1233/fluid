@@ -211,9 +211,28 @@ func (e *CacheEngine) syncRuntimeSpec(ctx cruntime.ReconcileRequestContext, runt
 			Namespace: e.namespace,
 		}
 		manager := component.NewComponentHelper(common.ComponentTypeWorker, e.Client)
+		// Mirror the creation path: the tiered store memory quota is charged on top
+		// of the resolved baseline, whether that came from the CacheRuntime or from
+		// the CacheRuntimeClass template. See TransformRuntimeTieredStore.
+		//
+		// The quota is read back from the workload rather than recomputed from the
+		// spec: tieredStore is not a supported update field, and SyncComponentSpec
+		// only patches resources, so a spec-derived quota would move the container's
+		// memory while the tmpfs volumes kept their original size.
+		workerResources := desiredComponentResources(runtime.Spec.Worker.Resources, runtimeClass.Topology.Worker)
+		if workerResources != nil {
+			podSpec, err := manager.GetPodSpec(ctx.Context, workerIdentity)
+			if err != nil {
+				e.Log.Error(err, "failed to read the worker pod spec", "component", workerIdentity.Name)
+				return err
+			}
+			resources := withTieredStoreMemoryQuota(*workerResources, chargedTieredStoreMemoryQuota(podSpec))
+			workerResources = &resources
+		}
+
 		workerSpec := component.ComponentSpec{
 			Version:   runtime.Spec.Worker.RuntimeVersion,
-			Resources: desiredComponentResources(runtime.Spec.Worker.Resources, runtimeClass.Topology.Worker),
+			Resources: workerResources,
 			Replicas:  &runtime.Spec.Worker.Replicas,
 		}
 		if err := manager.SyncComponentSpec(ctx.Context, workerIdentity, workerSpec); err != nil {

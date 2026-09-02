@@ -194,3 +194,29 @@ var _ = Describe("getSecretVolumeName Tests", Label("pkg.ddc.cache.engine.util_t
 		})
 	})
 })
+
+var _ = Describe("getTieredStoreVolumeName Tests", Label("pkg.ddc.cache.engine.util_test.go"), func() {
+	// The literals are pinned here on purpose: the names are rendered into the
+	// workload, and chargedTieredStoreMemoryQuota recovers the quota by matching
+	// them, so a rename is a breaking change rather than an implementation detail.
+	It("should generate the volume name for an indexed medium", func() {
+		Expect(getTieredStoreVolumeName(0, 0)).To(Equal("tiered-store-level-0-index-0"))
+		Expect(getTieredStoreVolumeName(1, 2)).To(Equal("tiered-store-level-1-index-2"))
+		Expect(getTieredStoreVolumeName(0, 10)).To(Equal("tiered-store-level-0-index-10"))
+	})
+
+	It("should generate the volume name for the process memory medium", func() {
+		Expect(getMemoryTieredStoreVolumeName(0)).To(Equal("tiered-store-level-0-memory"))
+		Expect(getMemoryTieredStoreVolumeName(3)).To(Equal("tiered-store-level-3-memory"))
+	})
+
+	It("should generate names chargedTieredStoreMemoryQuota recognises", func() {
+		Expect(getTieredStoreVolumeName(0, 0)).To(HavePrefix(tieredStoreVolumeNamePrefix))
+		Expect(getMemoryTieredStoreVolumeName(0)).To(HavePrefix(tieredStoreVolumeNamePrefix))
+	})
+
+	It("should always generate valid DNS-1035 label names", func() {
+		Expect(validation.IsDNS1035Label(getTieredStoreVolumeName(9, 9))).To(BeEmpty())
+		Expect(validation.IsDNS1035Label(getMemoryTieredStoreVolumeName(9))).To(BeEmpty())
+	})
+})

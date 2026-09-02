@@ -59,6 +59,15 @@ func (s *DaemonSetManager) GetNodeAffinity(identity *common.ComponentIdentity) (
 	return affinity, nil
 }
 
+func (s *DaemonSetManager) GetPodSpec(ctx context.Context, identity *common.ComponentIdentity) (*corev1.PodSpec, error) {
+	ds, err := kubeclient.GetDaemonset(s.client, identity.Name, identity.Namespace)
+	if err != nil {
+		return nil, err
+	}
+
+	return ds.Spec.Template.Spec.DeepCopy(), nil
+}
+
 func (s *DaemonSetManager) reconcileDaemonSet(ctx context.Context, component *common.CacheRuntimeComponentValue) error {
 	logger := log.FromContext(ctx)
 	logger.Info("start to reconciling ds workload")

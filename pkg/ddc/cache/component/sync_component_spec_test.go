@@ -18,6 +18,7 @@ package component
 
 import (
 	"context"
+	"encoding/json"
 
 	workloadv1alpha1 "github.com/fluid-cloudnative/advanced-statefulset/api/workload/v1alpha1"
 	datav1alpha1 "github.com/fluid-cloudnative/fluid/api/v1alpha1"
@@ -508,6 +509,56 @@ var _ = Describe("AdvancedStatefulSetManager SyncComponentSpec", func() {
 			}
 			result := manager.updateResources(emptyAsts, resources, GinkgoLogr)
 			Expect(result).To(BeFalse())
+		})
+
+		It("should not report a change when an equal quantity was produced by arithmetic", func() {
+			// A quantity built by adding, as the tiered store quota is, carries no cached
+			// string, while the one decoded from the workload does. Comparing the two
+			// structurally reports a difference that is not there, which makes every
+			// reconcile patch the workload again.
+			sum := resource.MustParse("4Gi")
+			sum.Add(resource.MustParse("8Gi"))
+
+			decoded := corev1.ResourceRequirements{}
+			Expect(json.Unmarshal([]byte(`{"limits":{"memory":"12Gi"}}`), &decoded)).To(Succeed())
+
+			asts := &workloadv1alpha1.AdvancedStatefulSet{
+				Spec: workloadv1alpha1.AdvancedStatefulSetSpec{
+					Template: corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "test", Resources: decoded}},
+						},
+					},
+				},
+			}
+			recomputed := corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{corev1.ResourceMemory: sum},
+			}
+
+			Expect(manager.updateResources(asts, recomputed, GinkgoLogr)).To(BeFalse())
+		})
+
+		It("should still report a change when the quantity really differs", func() {
+			decoded := corev1.ResourceRequirements{}
+			Expect(json.Unmarshal([]byte(`{"limits":{"memory":"12Gi"}}`), &decoded)).To(Succeed())
+
+			asts := &workloadv1alpha1.AdvancedStatefulSet{
+				Spec: workloadv1alpha1.AdvancedStatefulSetSpec{
+					Template: corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "test", Resources: decoded}},
+						},
+					},
+				},
+			}
+			bigger := resource.MustParse("4Gi")
+			bigger.Add(resource.MustParse("16Gi"))
+
+			Expect(manager.updateResources(asts, corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{corev1.ResourceMemory: bigger},
+			}, GinkgoLogr)).To(BeTrue())
+			limit := asts.Spec.Template.Spec.Containers[0].Resources.Limits[corev1.ResourceMemory]
+			Expect(limit.String()).To(Equal("20Gi"))
 		})
 	})
 })

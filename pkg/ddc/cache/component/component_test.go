@@ -292,6 +292,46 @@ var _ = Describe("AdvancedStatefulSetManager", func() {
 			Expect(err).To(HaveOccurred())
 		})
 	})
+
+	Describe("GetPodSpec", func() {
+		It("should return the pod spec of the workload", func() {
+			Expect(manager.Reconciler(ctx, component)).To(Succeed())
+
+			podSpec, err := manager.GetPodSpec(ctx, &common.ComponentIdentity{
+				Name:      component.Name,
+				Namespace: component.Namespace,
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(podSpec).NotTo(BeNil())
+			Expect(podSpec.Containers).To(HaveLen(1))
+			Expect(podSpec.Containers[0].Name).To(Equal("master"))
+			Expect(podSpec.Containers[0].Image).To(Equal("test-image:latest"))
+		})
+
+		It("should return a copy the caller cannot use to mutate the workload", func() {
+			Expect(manager.Reconciler(ctx, component)).To(Succeed())
+			identity := &common.ComponentIdentity{
+				Name:      component.Name,
+				Namespace: component.Namespace,
+			}
+
+			podSpec, err := manager.GetPodSpec(ctx, identity)
+			Expect(err).NotTo(HaveOccurred())
+			podSpec.Containers[0].Image = "mutated:latest"
+
+			reread, err := manager.GetPodSpec(ctx, identity)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(reread.Containers[0].Image).To(Equal("test-image:latest"))
+		})
+
+		It("should return error when AdvancedStatefulSet doesn't exist", func() {
+			_, err := manager.GetPodSpec(ctx, &common.ComponentIdentity{
+				Name:      component.Name,
+				Namespace: component.Namespace,
+			})
+			Expect(err).To(HaveOccurred())
+		})
+	})
 })
 
 var _ = Describe("DaemonSetManager", func() {
@@ -458,6 +498,46 @@ var _ = Describe("DaemonSetManager", func() {
 
 		It("should return error when DaemonSet doesn't exist", func() {
 			_, err := manager.ConstructComponentStatus(ctx, &common.ComponentIdentity{
+				Name:      component.Name,
+				Namespace: component.Namespace,
+			})
+			Expect(err).To(HaveOccurred())
+		})
+	})
+
+	Describe("GetPodSpec", func() {
+		It("should return the pod spec of the workload", func() {
+			Expect(manager.Reconciler(ctx, component)).To(Succeed())
+
+			podSpec, err := manager.GetPodSpec(ctx, &common.ComponentIdentity{
+				Name:      component.Name,
+				Namespace: component.Namespace,
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(podSpec).NotTo(BeNil())
+			Expect(podSpec.Containers).To(HaveLen(1))
+			Expect(podSpec.Containers[0].Name).To(Equal("worker"))
+			Expect(podSpec.Containers[0].Image).To(Equal("test-image:latest"))
+		})
+
+		It("should return a copy the caller cannot use to mutate the workload", func() {
+			Expect(manager.Reconciler(ctx, component)).To(Succeed())
+			identity := &common.ComponentIdentity{
+				Name:      component.Name,
+				Namespace: component.Namespace,
+			}
+
+			podSpec, err := manager.GetPodSpec(ctx, identity)
+			Expect(err).NotTo(HaveOccurred())
+			podSpec.Containers[0].Image = "mutated:latest"
+
+			reread, err := manager.GetPodSpec(ctx, identity)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(reread.Containers[0].Image).To(Equal("test-image:latest"))
+		})
+
+		It("should return error when DaemonSet doesn't exist", func() {
+			_, err := manager.GetPodSpec(ctx, &common.ComponentIdentity{
 				Name:      component.Name,
 				Namespace: component.Namespace,
 			})

@@ -889,6 +889,21 @@ var _ = Describe("CacheEngine Sync Tests", Label("pkg.ddc.cache.engine.sync_test
 			return limit.String()
 		}
 
+		// tmpfsSizeOf reports the size limit of the workload's memory-backed tiered
+		// store volume, i.e. the quota the container's memory has to cover.
+		tmpfsSizeOf := func(stsName string) string {
+			sts := &workloadv1alpha1.AdvancedStatefulSet{}
+			key := types.NamespacedName{Name: stsName, Namespace: "default"}
+			Expect(fakeClient.Get(ctx.Context, key, sts)).To(Succeed())
+			for _, volume := range sts.Spec.Template.Spec.Volumes {
+				emptyDir := volume.EmptyDir
+				if emptyDir != nil && emptyDir.Medium == corev1.StorageMediumMemory && emptyDir.SizeLimit != nil {
+					return emptyDir.SizeLimit.String()
+				}
+			}
+			return "<none>"
+		}
+
 		BeforeEach(func() {
 			seedTemplateResources(masterSts, &runtimeClass.Topology.Master.Template)
 			seedTemplateResources(workerSts, &runtimeClass.Topology.Worker.Template)
@@ -982,6 +997,167 @@ var _ = Describe("CacheEngine Sync Tests", Label("pkg.ddc.cache.engine.sync_test
 				Expect(engine.syncRuntimeSpec(ctx, runtimeObj, runtimeClass)).To(Succeed())
 
 				Expect(memLimitOf(workerSts)).To(Equal("8Gi"))
+			})
+		})
+
+		Context("when the tiered store baseline comes from the template", func() {
+			// With the CacheRuntime declaring no resources, the baseline the quota is
+			// charged on top of is the CacheRuntimeClass template value. The quota must
+			// still be added, otherwise the worker is short by the quota it was created
+			// with the moment a sync runs.
+			BeforeEach(func() {
+				runtimeObj.Spec.Worker.TieredStore = datav1alpha1.RuntimeTieredStore{
+					Levels: []datav1alpha1.RuntimeTieredStoreLevel{
+						{ProcessMemory: &datav1alpha1.ProcessMemoryMediumSource{Quota: resource.MustParse("8Gi")}},
+					},
+				}
+				Expect(fakeClient.Update(ctx.Context, runtimeObj)).To(Succeed())
+			})
+
+			It("should charge the quota on top of the template value", func() {
+				Expect(runtimeObj.Spec.Worker.Resources.Limits).To(BeNil())
+				Expect(runtimeObj.Spec.Worker.Resources.Requests).To(BeNil())
+
+				// The workload carries the template value plus the quota, as creation left it.
+				key := types.NamespacedName{Name: workerSts, Namespace: "default"}
+				sts := &workloadv1alpha1.AdvancedStatefulSet{}
+				Expect(fakeClient.Get(ctx.Context, key, sts)).To(Succeed())
+				sts.Spec.Template.Spec.Containers[0].Resources = corev1.ResourceRequirements{
+					Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("10Gi")},
+				}
+				chargedQuota := resource.MustParse("8Gi")
+				sts.Spec.Template.Spec.Volumes = []corev1.Volume{{
+					Name: "tiered-store-level-0-memory",
+					VolumeSource: corev1.VolumeSource{
+						EmptyDir: &corev1.EmptyDirVolumeSource{
+							Medium:    corev1.StorageMediumMemory,
+							SizeLimit: &chargedQuota,
+						},
+					},
+				}}
+				Expect(fakeClient.Update(ctx.Context, sts)).To(Succeed())
+
+				syncRuntime, err := engine.getRuntime()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(engine.syncRuntimeSpec(ctx, syncRuntime, runtimeClass)).To(Succeed())
+
+				// template 2Gi + quota 8Gi, not the bare template value.
+				Expect(memLimitOf(workerSts)).To(Equal("10Gi"))
+			})
+		})
+
+		Context("when the CacheRuntime declares a memory tiered store", func() {
+			// The creation path derives the worker's memory as
+			// <user baseline> + <tiered store memory quota>. A later sync recomputes
+			// the desired state from the same spec and must land on the same value,
+			// otherwise the quota silently disappears on the second reconcile.
+			BeforeEach(func() {
+				runtimeObj.Spec.Worker.Resources = corev1.ResourceRequirements{
+					Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("4Gi")},
+				}
+				runtimeObj.Spec.Worker.TieredStore = datav1alpha1.RuntimeTieredStore{
+					Levels: []datav1alpha1.RuntimeTieredStoreLevel{
+						{ProcessMemory: &datav1alpha1.ProcessMemoryMediumSource{Quota: resource.MustParse("8Gi")}},
+					},
+				}
+				Expect(fakeClient.Update(ctx.Context, runtimeObj)).To(Succeed())
+			})
+
+			It("should keep the tiered store quota when syncing after creation", func() {
+				// Creation reconcile: derive the desired state and create the workload.
+				createRuntime, err := engine.getRuntime()
+				Expect(err).NotTo(HaveOccurred())
+
+				// Read the baseline before transforming: the transform must not be
+				// trusted to leave the runtime spec alone.
+				baseline := createRuntime.Spec.Worker.Resources.Limits[corev1.ResourceMemory].DeepCopy()
+
+				value, err := engine.transform(dataset, createRuntime, runtimeClass)
+				Expect(err).NotTo(HaveOccurred())
+				desired := value.Worker.PodTemplateSpec.Spec.Containers[0].Resources.Limits[corev1.ResourceMemory]
+
+				// Guard against a vacuous comparison: creation must actually charge the quota.
+				Expect(desired.Cmp(baseline)).To(Equal(1), "creation path must charge the tiered store quota")
+
+				key := types.NamespacedName{Name: workerSts, Namespace: "default"}
+				seeded := &workloadv1alpha1.AdvancedStatefulSet{}
+				Expect(fakeClient.Get(ctx.Context, key, seeded)).To(Succeed())
+				Expect(fakeClient.Delete(ctx.Context, seeded)).To(Succeed())
+
+				_, err = engine.SetupWorkerComponent(value.Worker)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(memLimitOf(workerSts)).To(Equal(desired.String()))
+
+				// Sync reconcile: re-read the runtime the way a fresh reconcile would,
+				// so the sync can only rely on what is persisted in the spec.
+				syncRuntime, err := engine.getRuntime()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(engine.syncRuntimeSpec(ctx, syncRuntime, runtimeClass)).To(Succeed())
+
+				Expect(memLimitOf(workerSts)).To(Equal(desired.String()))
+			})
+
+			// createWorker runs the creation reconcile and returns the memory the
+			// creation path derives, i.e. baseline + quota.
+			createWorker := func() string {
+				createRuntime, err := engine.getRuntime()
+				Expect(err).NotTo(HaveOccurred())
+				value, err := engine.transform(dataset, createRuntime, runtimeClass)
+				Expect(err).NotTo(HaveOccurred())
+				desired := value.Worker.PodTemplateSpec.Spec.Containers[0].Resources.Limits[corev1.ResourceMemory]
+
+				key := types.NamespacedName{Name: workerSts, Namespace: "default"}
+				seeded := &workloadv1alpha1.AdvancedStatefulSet{}
+				Expect(fakeClient.Get(ctx.Context, key, seeded)).To(Succeed())
+				Expect(fakeClient.Delete(ctx.Context, seeded)).To(Succeed())
+				_, err = engine.SetupWorkerComponent(value.Worker)
+				Expect(err).NotTo(HaveOccurred())
+				return desired.String()
+			}
+
+			syncOnce := func() {
+				syncRuntime, err := engine.getRuntime()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(engine.syncRuntimeSpec(ctx, syncRuntime, runtimeClass)).To(Succeed())
+			}
+
+			It("should not let an edited tiered store quota half-apply", func() {
+				// tieredStore is not a supported update field, and SyncComponentSpec only
+				// patches resources. A spec-derived quota would move the container's memory
+				// to baseline+16Gi while the tmpfs volume stayed at the 8Gi it was created
+				// with.
+				desired := createWorker()
+				Expect(tmpfsSizeOf(workerSts)).To(Equal("8Gi"))
+
+				edited, err := engine.getRuntime()
+				Expect(err).NotTo(HaveOccurred())
+				edited.Spec.Worker.TieredStore.Levels[0].ProcessMemory.Quota = resource.MustParse("16Gi")
+				Expect(fakeClient.Update(ctx.Context, edited)).To(Succeed())
+
+				syncOnce()
+
+				Expect(memLimitOf(workerSts)).To(Equal(desired))
+				Expect(tmpfsSizeOf(workerSts)).To(Equal("8Gi"))
+			})
+
+			It("should recharge a quota that an earlier release stripped", func() {
+				// Workloads created before this fix have the bare baseline on the container
+				// and the full quota on the tmpfs volume. Recovering the quota from the
+				// volume rather than the container is what lets them be repaired in place.
+				desired := createWorker()
+
+				key := types.NamespacedName{Name: workerSts, Namespace: "default"}
+				stripped := &workloadv1alpha1.AdvancedStatefulSet{}
+				Expect(fakeClient.Get(ctx.Context, key, stripped)).To(Succeed())
+				stripped.Spec.Template.Spec.Containers[0].Resources = corev1.ResourceRequirements{
+					Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("4Gi")},
+				}
+				Expect(fakeClient.Update(ctx.Context, stripped)).To(Succeed())
+				Expect(memLimitOf(workerSts)).To(Equal("4Gi"))
+
+				syncOnce()
+
+				Expect(memLimitOf(workerSts)).To(Equal(desired))
 			})
 		})
 	})

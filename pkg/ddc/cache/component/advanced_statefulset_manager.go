@@ -19,7 +19,6 @@ package component
 import (
 	"context"
 	"fmt"
-	"reflect"
 
 	workloadv1alpha1 "github.com/fluid-cloudnative/advanced-statefulset/api/workload/v1alpha1"
 	datav1alpha1 "github.com/fluid-cloudnative/fluid/api/v1alpha1"
@@ -29,6 +28,7 @@ import (
 	"github.com/go-logr/logr"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -61,6 +61,16 @@ func (s *AdvancedStatefulSetManager) GetNodeAffinity(identity *common.ComponentI
 
 	affinity := kubeclient.MergeNodeSelectorAndNodeAffinity(asts.Spec.Template.Spec.NodeSelector, asts.Spec.Template.Spec.Affinity)
 	return affinity, nil
+}
+
+func (s *AdvancedStatefulSetManager) GetPodSpec(ctx context.Context, identity *common.ComponentIdentity) (*corev1.PodSpec, error) {
+	asts := &workloadv1alpha1.AdvancedStatefulSet{}
+	err := s.client.Get(ctx, types.NamespacedName{Name: identity.Name, Namespace: identity.Namespace}, asts)
+	if err != nil {
+		return nil, err
+	}
+
+	return asts.Spec.Template.Spec.DeepCopy(), nil
 }
 
 func (s *AdvancedStatefulSetManager) reconcileStatefulSet(ctx context.Context, component *common.CacheRuntimeComponentValue) error {
@@ -293,8 +303,11 @@ func (s *AdvancedStatefulSetManager) updateResources(asts *workloadv1alpha1.Adva
 
 	container := &asts.Spec.Template.Spec.Containers[0]
 
-	// Directly compare and replace, nil is also a valid value
-	if !reflect.DeepEqual(container.Resources, resources) {
+	// Compare semantically rather than structurally: resource.Quantity caches the
+	// string it was parsed from, and a quantity produced by arithmetic carries an
+	// empty cache. reflect.DeepEqual would read that as a change on every reconcile
+	// even when the value is identical. nil is still a valid desired value.
+	if !equality.Semantic.DeepEqual(container.Resources, resources) {
 		logger.Info("resources changed, will update")
 		container.Resources = *resources.DeepCopy()
 		return true

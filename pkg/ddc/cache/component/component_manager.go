@@ -34,6 +34,10 @@ type ComponentManager interface {
 	GetNodeAffinity(identity *common.ComponentIdentity) (*corev1.NodeAffinity, error)
 	// SyncComponentSpec synchronizes component specification changes to the workload
 	SyncComponentSpec(ctx context.Context, identity *common.ComponentIdentity, newSpec ComponentSpec) error
+	// GetPodSpec returns a copy of the pod template spec of the component's workload,
+	// so callers can inspect what the workload carries without depending on the
+	// concrete workload type.
+	GetPodSpec(ctx context.Context, identity *common.ComponentIdentity) (*corev1.PodSpec, error)
 }
 
 // ComponentSpec represents the specification that can be synchronized to a component
